@@ -1,0 +1,31 @@
+[project]
+name = "python-acmclient"
+version = "0.1.0"
+description = "Client commands for integrating with Red Hat ACM"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "babel>=2.3.4,!=2.4.0",
+    "esisdk>=0.5.0",
+    "kubernetes>=31.0.0",
+    "openstacksdk<1.3.0",
+    "osc-lib>=1.8.0",
+    "oslo-utils>=4.5.0",
+    "passlib>=1.7.0",
+    "pbr>=2.0.0,!=2.1.0",
+    "psutil>=3.2.2",
+    "python-ironicclient>=2.3.0,!=2.5.2,!=2.7.1,!=3.0.0",
+    "python-openstackclient>=5.2.0",
+]
+
+[[tool.uv.index]]
+url = "http://devpi.internal/root/pypi/+simple/"
+default = true
+
+[project.entry-points."openstack.cli.extension"]
+acmclient = "acmclient.plugin"
+
+[project.entry-points."openstack.acmclient.v1"]
+acm_provision = "acmclient.v1.provision:Provision"
+acm_agent_metadata_sync = "acmclient.v1.metadata:Sync"
+acm_port_forward_service = "acmclient.v1.networking:PortForwardService"
