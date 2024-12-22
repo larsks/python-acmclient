@@ -26,6 +26,10 @@ class Network:
     def find_subnet(self, name_or_id: str):
         return self.connection.network.find_subnet(name_or_id)
 
+    @cache
+    def find_floating_ip(self, name_or_id: str):
+        return self.connection.network.find_ip(name_or_id)
+
     def find_or_create_floating_ip(
         self,
         ipaddr: str | None = None,

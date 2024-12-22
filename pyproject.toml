@@ -28,4 +28,5 @@ acmclient = "acmclient.plugin"
 [project.entry-points."openstack.acmclient.v1"]
 acm_provision = "acmclient.v1.provision:Provision"
 acm_agent_metadata_sync = "acmclient.v1.metadata:Sync"
-acm_port_forward_service = "acmclient.v1.networking:PortForwardService"
+acm_port_forward_create = "acmclient.v1.networking:PortForwardCreate"
+acm_port_forward_purge = "acmclient.v1.networking:PortForwardPurge"

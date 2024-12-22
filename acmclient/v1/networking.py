@@ -29,7 +29,7 @@ LOG = logging.getLogger(__name__)
 
 
 @dataclass
-class PortForwardArgs(kubehelper.KubernetesArgs):
+class PortForwardCreateArgs(kubehelper.KubernetesArgs):
     all_services: bool = True
     service_type: str | None = None
     internal_ip: str | None = None
@@ -45,7 +45,48 @@ class PortForwardArgs(kubehelper.KubernetesArgs):
         return cls(**{k: v for k, v in kwargs.items() if k in names})
 
 
-class PortForwardService(command.Lister):
+class PortForwardPurge(command.Lister):
+    @override
+    def get_parser(self, prog_name: str) -> argparse.ArgumentParser:
+        parser = super().get_parser(prog_name)
+
+        parser.add_argument(
+            "floating_ips",
+            nargs="*",
+            help=_("List of floating ips from which to remove port forwardings"),
+        )
+
+        return parser
+
+    @override
+    def take_action(self, parsed_args: argparse.Namespace):
+        osnetwork = openstack_helpers.Network(self.app.client_manager.sdk_connection)
+        forwards = []
+        for ipaddr in parsed_args.floating_ips:
+            fip = osnetwork.find_floating_ip(ipaddr)
+            forwards.extend(
+                (ipaddr, fip, fwd)
+                for fwd in osnetwork.connection.network.floating_ip_port_forwardings(
+                    fip
+                )
+            )
+
+        for ipaddr, fip, fwd in forwards:
+            osnetwork.connection.network.delete_floating_ip_port_forwarding(fip, fwd)
+
+        return ["ID", "Port", "Protocol", "Internal IP", "External IP"], [
+            [
+                fwd[2].id,
+                fwd[2].internal_port,
+                fwd[2].protocol,
+                fwd[2].internal_ip_address,
+                fwd[0],
+            ]
+            for fwd in forwards
+        ]
+
+
+class PortForwardCreate(command.Lister):
     @override
     def get_parser(self, prog_name: str) -> argparse.ArgumentParser:
         parser = super().get_parser(prog_name)
@@ -95,7 +136,7 @@ class PortForwardService(command.Lister):
 
     @override
     def take_action(self, parsed_args: argparse.Namespace):
-        self.args = args = PortForwardArgs.from_args(**vars(parsed_args))
+        self.args = args = PortForwardCreateArgs.from_args(**vars(parsed_args))
         osnetwork = openstack_helpers.Network(self.app.client_manager.sdk_connection)
 
         if not args.service_names and not args.all_services:
