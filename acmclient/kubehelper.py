@@ -36,7 +36,7 @@ def add_kubernetes_args(parser: argparse.ArgumentParser) -> None:
         "--kubeconfig",
         "-k",
         metavar="<kubeconfig-file>",
-        help=f"Path to Kubernetes credentials file (Env: KUBECONFIG)",
+        help="Path to Kubernetes credentials file (Env: KUBECONFIG)",
     )
     parser.add_argument(
         "--context", help="Name of kubernetes configuration context to use"

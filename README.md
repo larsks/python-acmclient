@@ -14,4 +14,3 @@
 - `openstack acm port-forward [-n namespace] [--internal-ip address] service external_ip`
 
   Create a port forward for a single service. `--internal-ip` is only necessry for NodePort services.
-

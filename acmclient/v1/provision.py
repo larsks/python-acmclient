@@ -10,10 +10,8 @@
 #   License for the specific language governing permissions and limitations
 #   under the License.
 
-import logging
-
 from osc_lib.command import command
-from osc_lib.i18n import _
+from osc_lib.i18n import _  # noqa
 
 
 class Provision(command.ShowOne):

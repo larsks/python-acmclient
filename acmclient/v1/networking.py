@@ -12,17 +12,14 @@
 
 import argparse
 import logging
-import ipaddress
 import kubernetes.client
-import openstack.network.v2.port
-import openstack.network.v2.floating_ip
 
 import dataclasses
 from dataclasses import dataclass, field
 
 from osc_lib.exceptions import CommandError
 from osc_lib.command import command
-from osc_lib.i18n import _
+from osc_lib.i18n import _  # noqa
 from typing import override
 
 from acmclient import kubehelper
