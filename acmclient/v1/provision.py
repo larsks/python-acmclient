@@ -15,6 +15,7 @@ import logging
 from osc_lib.command import command
 from osc_lib.i18n import _
 
+
 class Provision(command.ShowOne):
     def take_action(self, parsed_args):
         print("This is a test")

@@ -14,7 +14,10 @@ import argparse
 import logging
 import ipaddress
 import kubernetes.client
+import openstack.network.v2.port
+import openstack.network.v2.floating_ip
 
+import dataclasses
 from dataclasses import dataclass, field
 
 from osc_lib.exceptions import CommandError
@@ -23,6 +26,7 @@ from osc_lib.i18n import _
 from typing import override
 
 from acmclient import kubehelper
+from acmclient import openstack_helpers
 
 LOG = logging.getLogger(__name__)
 
@@ -38,9 +42,15 @@ class PortForwardArgs(kubehelper.KubernetesArgs):
     external_ip_network: str | None = None
     service_names: list[str] = field(default_factory=list)
 
+    @classmethod
+    def from_args(cls, **kwargs):
+        names = set([f.name for f in dataclasses.fields(cls)])
+        return cls(**{k: v for k, v in kwargs.items() if k in names})
 
-class PortForwardService(command.Command):
-    def get_parser(self, prog_name: str) -> None:
+
+class PortForwardService(command.Lister):
+    @override
+    def get_parser(self, prog_name: str) -> argparse.ArgumentParser:
         parser = super().get_parser(prog_name)
         kubehelper.add_kubernetes_args(parser)
 
@@ -88,13 +98,12 @@ class PortForwardService(command.Command):
 
     @override
     def take_action(self, parsed_args: argparse.Namespace):
-        self.args = args = PortForwardArgs(**vars(parsed_args))
-        self.network = None
-        self.subnet = None
+        self.args = args = PortForwardArgs.from_args(**vars(parsed_args))
+        osnetwork = openstack_helpers.Network(self.app.client_manager.sdk_connection)
 
         if not args.service_names and not args.all_services:
             raise CommandError(
-                _("ERROR: you must either provide a list of services or --all")
+                "ERROR: you must either provide a list of services or --all"
             )
 
         self.kubeclient = kubehelper.get_corev1_client(
@@ -102,8 +111,17 @@ class PortForwardService(command.Command):
         )
 
         services = self.select_services()
-        print("found services", [service.metadata.name for service in services])
+        LOG.debug(
+            "found services: %s",
+            ",".join([service.metadata.name for service in services]),
+        )
 
+        fip = osnetwork.find_or_create_floating_ip(
+            args.external_ip, external_ip_network=args.external_ip_network
+        )
+        LOG.debug("using floating ip address %s", fip)
+
+        forwards = []
         for service in services:
             if service.spec.type == "LoadBalancer":
                 target_ip = service.status.loadBalancer.ingress[0].ip
@@ -111,78 +129,54 @@ class PortForwardService(command.Command):
                 target_ip = self.args.internal_ip
             else:
                 raise CommandError(
-                    _(
-                        f"{service.metadata.name} is a {service.spec.type} service and you have not set --internal-ip"
-                    )
+                    f"{service.metadata.name} is a {service.spec.type} service and you have not set --internal-ip"
                 )
 
-            port = self.find_or_create_port(
-                target_ip, f"service:{service.metadata.name}"
+            internal_port = osnetwork.find_or_create_port(
+                target_ip,
+                internal_ip_network=args.internal_ip_network,
+                internal_ip_subnet=args.internal_ip_subnet,
+                description=f"service:{service.metadata.name}",
             )
-            print("got port:", port)
+            LOG.debug("using port %s", internal_port)
 
-    def find_or_create_port(self, ipaddr: str, description=None):
-        conn = self.app.client_manager.sdk_connection
-        ports = list(conn.network.ports(fixed_ips=f"ip_address={ipaddr}"))
-        if len(ports) == 1:
-            port = ports[0]
-            LOG.info(f"using existing port {port.id} for address {ipaddr}")
-            return port
-        elif len(ports) > 1:
-            raise CommandError(_(f"ERROR: found multiple ports with address {ipaddr}"))
-
-        if self.network is None:
-            if self.args.internal_ip_network is None:
-                raise CommandError(
-                    _(
-                        "ERROR: unable to create a port because --internal-ip-network is unset"
-                    )
-                )
-
-            network = conn.network.find_network(self.args.internal_ip_network)
-            if network is None:
-                raise CommandError(
-                    _(f"ERROR: unable to find network {self.args.internal_ip_network}")
-                )
-
-            self.network = network
-
-        assert self.network is not None
-        if self.subnet is None:
-            if self.args.internal_ip_subnet:
-                subnet = conn.network.find_subnet(self.args.internal_ip_subnet)
-                if subnet is None:
-                    raise CommandError(
-                        _(
-                            f"ERROR: unable to find subnet {self.args.internal_ip_subnet}"
-                        )
-                    )
-            else:
-                _ipaddr = ipaddress.ip_address(ipaddr)
-                for subnet in conn.network.subnets(network_id=self.network.id):
-                    if subnet.ip_version != _ipaddr.version:
-                        continue
-                    cidr = ipaddress.ip_network(subnet.cidr)
-                    if _ipaddr in cidr:
-                        break
+            for port in service.spec.ports:
+                if service.spec.type == "LoadBalancer":
+                    target_port = port.port
                 else:
-                    raise CommandError(
-                        _(f"ERROR: unable to find a subnet for address {ipaddr}")
-                    )
+                    target_port = port.node_port
 
-                LOG.debug(f"found subnet {subnet.id} for address {ipaddr}")
-                self.subnet = subnet
+                protocol = port.protocol.lower()
 
-        assert self.subnet is not None
-        port = conn.network.create_port(
-            name=description,
-            network_id=self.network.id,
-            fixed_ips=[{"subnet_id": self.subnet.id, "ip_address": ipaddr}],
-        )
-        LOG.info(
-            f"created port {port.id} in subnet {self.subnet.name} for address {ipaddr}"
-        )
-        return port
+                LOG.info(
+                    "forward port %s from %s -> %s for service %s",
+                    target_port,
+                    args.internal_ip,
+                    fip.name,
+                    service.metadata.name,
+                )
+
+                fwd = self.app.client_manager.sdk_connection.network.create_floating_ip_port_forwarding(
+                    fip,
+                    internal_ip_address=args.internal_ip,
+                    internal_port=target_port,
+                    internal_port_id=internal_port.id,
+                    external_port=target_port,
+                    protocol=protocol,
+                )
+                forwards.append((service, fip, fwd))
+
+        return ["ID", "Service", "Port", "Protocol", "Internal IP", "External IP"], [
+            [
+                fwd[2].id,
+                fwd[0].metadata.name,
+                fwd[2].internal_port,
+                fwd[2].protocol,
+                fwd[2].internal_ip_address,
+                fwd[1].name,
+            ]
+            for fwd in forwards
+        ]
 
     def select_services(self):
         namespace = (
