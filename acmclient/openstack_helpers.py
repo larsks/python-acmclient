@@ -104,11 +104,11 @@ class Network:
                     f"ERROR: unable to find a subnet for address {ipaddr}"
                 )
 
-        LOG.debug(f"using subnet {subnet.id} for address {ipaddr}")
+        LOG.debug(f"using subnet {subnet.id} for address service_namesipaddr")
 
         port = conn.network.create_port(
             network_id=network.id,
             fixed_ips=[{"subnet_id": subnet.id, "ip_address": ipaddr}],
         )
-        LOG.info(f"created port {port.id} in subnet {subnet.name} for address {ipaddr}")
+        LOG.info(f"create port {port.id} in subnet {subnet.name} for address {ipaddr}")
         return port

@@ -12,10 +12,11 @@
 
 import argparse
 import logging
+import ipaddress
 import kubernetes.client
 
-import dataclasses
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from enum import StrEnum
 
 from osc_lib.exceptions import CommandError
 from osc_lib.command import command
@@ -28,27 +29,57 @@ from acmclient import openstack_helpers
 LOG = logging.getLogger(__name__)
 
 
+class Protocol(StrEnum):
+    TCP = "tcp"
+    UDP = "udp"
+
+
 @dataclass
-class PortForwardCreateArgs(kubehelper.KubernetesArgs):
-    all_services: bool = True
-    service_type: str | None = None
-    internal_ip: str | None = None
-    internal_ip_network: str | None = None
-    internal_ip_subnet: str | None = None
-    external_ip: str | None = None
-    external_ip_network: str | None = None
-    service_names: list[str] = field(default_factory=list)
+class PortForward:
+    internal_ip: ipaddress.IPv4Address | ipaddress.IPv6Address
+    internal_port: int
+    external_ip: ipaddress.IPv4Address | ipaddress.IPv6Address
+    external_port: int
+    protocol: Protocol = Protocol.TCP
 
     @classmethod
-    def from_args(cls, **kwargs):
-        names = set([f.name for f in dataclasses.fields(cls)])
-        return cls(**{k: v for k, v in kwargs.items() if k in names})
+    def from_spec(cls, spec: str):
+        if "/" in spec:
+            spec, protocol = spec.split("/")
+        else:
+            protocol = "tcp"
+
+        parts = spec.split(":")
+        if len(parts) < 3 or len(parts) > 4:
+            raise ValueError("invalid port forward specification")
+
+        internal_ip, internal_port, external_ip = parts[:3]
+        if len(parts) == 4:
+            external_port = parts[3]
+        else:
+            external_port = internal_port
+
+        return cls(
+            internal_ip=ipaddress.ip_address(internal_ip),
+            internal_port=int(internal_port),
+            external_ip=ipaddress.ip_address(external_ip),
+            external_port=int(external_port),
+            protocol=Protocol(protocol),
+        )
 
 
 class PortForwardPurge(command.Lister):
     @override
     def get_parser(self, prog_name: str) -> argparse.ArgumentParser:
         parser = super().get_parser(prog_name)
+
+        parser.add_argument(
+            "--port",
+            "-p",
+            action="append",
+            default=[],
+            help="Delete only port forwards with this internal port",
+        )
 
         parser.add_argument(
             "floating_ips",
@@ -72,6 +103,14 @@ class PortForwardPurge(command.Lister):
             )
 
         for ipaddr, fip, fwd in forwards:
+            LOG.info(
+                "delete port forward %s %s:%d -> %s:%d",
+                fwd.id,
+                fwd.internal_ip_address,
+                fwd.internal_port,
+                fip.floating_ip_address,
+                fwd.external_port,
+            )
             osnetwork.connection.network.delete_floating_ip_port_forwarding(fip, fwd)
 
         return ["ID", "Port", "Protocol", "Internal IP", "External IP"], [
@@ -86,7 +125,7 @@ class PortForwardPurge(command.Lister):
         ]
 
 
-class PortForwardCreate(command.Lister):
+class PortForwardService(command.Lister):
     @override
     def get_parser(self, prog_name: str) -> argparse.ArgumentParser:
         parser = super().get_parser(prog_name)
@@ -136,26 +175,30 @@ class PortForwardCreate(command.Lister):
 
     @override
     def take_action(self, parsed_args: argparse.Namespace):
-        self.args = args = PortForwardCreateArgs.from_args(**vars(parsed_args))
         osnetwork = openstack_helpers.Network(self.app.client_manager.sdk_connection)
 
-        if not args.service_names and not args.all_services:
+        if not parsed_args.service_names and not parsed_args.all_services:
             raise CommandError(
                 "ERROR: you must either provide a list of services or --all"
             )
 
         self.kubeclient = kubehelper.get_corev1_client(
-            config_file=args.kubeconfig, context=args.context
+            config_file=parsed_args.kubeconfig, context=parsed_args.context
         )
 
-        services = self.select_services()
+        services = self.select_services(
+            namespace=parsed_args.namespace,
+            all_services=parsed_args.all_services,
+            service_type=parsed_args.service_type,
+            service_names=parsed_args.service_names,
+        )
         LOG.debug(
             "found services: %s",
             ",".join([service.metadata.name for service in services]),
         )
 
         fip = osnetwork.find_or_create_floating_ip(
-            args.external_ip, external_ip_network=args.external_ip_network
+            parsed_args.external_ip, external_ip_network=parsed_args.external_ip_network
         )
         LOG.debug("using floating ip address %s", fip)
 
@@ -163,8 +206,8 @@ class PortForwardCreate(command.Lister):
         for service in services:
             if service.spec.type == "LoadBalancer":
                 target_ip = service.status.loadBalancer.ingress[0].ip
-            elif self.args.internal_ip is not None:
-                target_ip = self.args.internal_ip
+            elif parsed_args.internal_ip is not None:
+                target_ip = parsed_args.internal_ip
             else:
                 raise CommandError(
                     f"{service.metadata.name} is a {service.spec.type} service and you have not set --internal-ip"
@@ -172,8 +215,8 @@ class PortForwardCreate(command.Lister):
 
             internal_port = osnetwork.find_or_create_port(
                 target_ip,
-                internal_ip_network=args.internal_ip_network,
-                internal_ip_subnet=args.internal_ip_subnet,
+                internal_ip_network=parsed_args.internal_ip_network,
+                internal_ip_subnet=parsed_args.internal_ip_subnet,
                 description=f"service:{service.metadata.name}",
             )
             LOG.debug("using port %s", internal_port)
@@ -187,16 +230,17 @@ class PortForwardCreate(command.Lister):
                 protocol = port.protocol.lower()
 
                 LOG.info(
-                    "forward port %s from %s -> %s for service %s",
+                    "create port forward %s:%s -> %s:%s for service %s",
+                    parsed_args.internal_ip,
                     target_port,
-                    args.internal_ip,
-                    fip.name,
+                    fip.floating_ip_address,
+                    target_port,
                     service.metadata.name,
                 )
 
                 fwd = self.app.client_manager.sdk_connection.network.create_floating_ip_port_forwarding(
                     fip,
-                    internal_ip_address=args.internal_ip,
+                    internal_ip_address=parsed_args.internal_ip,
                     internal_port=target_port,
                     internal_port_id=internal_port.id,
                     external_port=target_port,
@@ -216,40 +260,34 @@ class PortForwardCreate(command.Lister):
             for fwd in forwards
         ]
 
-    def select_services(self):
-        namespace = (
-            kubehelper.current_namespace()
-            if self.args.namespace is None
-            else self.args.namespace
-        )
-
+    def select_services(
+        self, namespace=None, all_services=False, service_type=None, service_names=None
+    ):
+        namespace = kubehelper.current_namespace() if namespace is None else namespace
         services = self.kubeclient.list_namespaced_service(namespace)
         selected = []
 
-        if self.args.all_services:
+        if all_services:
             selected = [
                 service
                 for service in services.items
                 if (
                     (
-                        self.args.service_type is not None
-                        and service.spec.type.lower() == self.args.service_type
+                        service_type is not None
+                        and service.spec.type.lower() == service_type
                     )
                     or (
-                        self.args.service_type is None
+                        service_type is None
                         and service.spec.type.lower() in ["nodeport", "loadbalancer"]
                     )
                 )
-                and (
-                    self.args.all_services
-                    or service.metadata.name in self.args.service_names
-                )
+                and (all_services or service.metadata.name in service_names)
             ]
         else:
-            for service_name in self.args.service_names:
+            for service_name in service_names:
                 try:
                     service = self.kubeclient.read_namespaced_service(
-                        service_name, self.args.namespace
+                        service_name, namespace
                     )
                 except kubernetes.client.exceptions.ApiException as err:
                     if err.status == 404:
@@ -264,3 +302,76 @@ class PortForwardCreate(command.Lister):
                 selected.append(service)
 
         return selected
+
+
+class PortForwardCreate(command.Lister):
+    @override
+    def get_parser(self, prog_name: str) -> argparse.ArgumentParser:
+        parser = super().get_parser(prog_name)
+
+        parser.add_argument(
+            "--internal-ip-network",
+            help=_("Network from which to allocate ports for internal ips"),
+        )
+        parser.add_argument(
+            "--internal-ip-subnet",
+            help=_("Subnet from which to allocate ports for internal ips"),
+        )
+        parser.add_argument(
+            "--external-ip-network",
+            default="external",
+            help=_("Network from which to allocate floating ips"),
+        )
+        parser.add_argument("fwdspec", nargs="+")
+
+        return parser
+
+    @override
+    def take_action(self, parsed_args: argparse.Namespace):
+        osnetwork = openstack_helpers.Network(self.app.client_manager.sdk_connection)
+
+        forwards = []
+        for spec in parsed_args.fwdspec:
+            parsed_spec = PortForward.from_spec(spec)
+
+            fip = osnetwork.find_floating_ip(str(parsed_spec.external_ip))
+            if fip is None:
+                raise CommandError(
+                    f"ERROR: unable to find floating ip {parsed_spec.external_ip}"
+                )
+
+            internal_port = osnetwork.find_or_create_port(
+                str(parsed_spec.internal_ip),
+                internal_ip_network=parsed_args.internal_ip_network,
+                internal_ip_subnet=parsed_args.internal_ip_subnet,
+            )
+            LOG.debug("using port %s", internal_port)
+
+            LOG.info(
+                "create port forward %s:%s -> %s:%s",
+                parsed_spec.internal_ip,
+                parsed_spec.internal_port,
+                fip.floating_ip_address,
+                parsed_spec.external_port,
+            )
+
+            fwd = self.app.client_manager.sdk_connection.network.create_floating_ip_port_forwarding(
+                fip,
+                internal_ip_address=str(parsed_spec.internal_ip),
+                internal_port=parsed_spec.internal_port,
+                internal_port_id=internal_port.id,
+                external_port=parsed_spec.external_port,
+                protocol=parsed_spec.protocol.value,
+            )
+            forwards.append((fip, fwd))
+
+        return ["ID", "Port", "Protocol", "Internal IP", "External IP"], [
+            [
+                fwd[1].id,
+                fwd[1].internal_port,
+                fwd[1].protocol,
+                fwd[1].internal_ip_address,
+                fwd[0].floating_ip_address,
+            ]
+            for fwd in forwards
+        ]
